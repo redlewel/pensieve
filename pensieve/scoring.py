@@ -27,7 +27,7 @@ def build_recall_pipeline(
     *,
     query_vector: list[float],
     use_gates: bool,
-    domain: Optional[str] = None,
+    project: Optional[str] = None,
     dimension: Optional[str] = None,
     categories: Optional[list[str]] = None,
     since: Optional[datetime] = None,
@@ -41,13 +41,18 @@ def build_recall_pipeline(
 ) -> list[dict[str, Any]]:
     vs: dict[str, Any] = {
         "index": INDEX_NAME, "path": "embedding",
-        "queryVector": query_vector, "numCandidates": pool, "limit": pool,
+        "queryVector": query_vector,
+        "numCandidates": pool * 2,   # explore wider than the re-rank pool
+        "limit": pool,               # candidates handed to the weighted re-rank
     }
 
+    # Project is the isolation scope — always applied, even for the naive column,
+    # so queries never intersect across projects.
+    # Category / temporal gates apply only when use_gates is on.
+    flt: dict[str, Any] = {}
+    if project:
+        flt["project"] = project
     if use_gates:
-        flt: dict[str, Any] = {}
-        if domain:
-            flt["domain"] = domain
         if categories:
             flt["categories"] = {"$in": categories}
         if since or until:
@@ -57,8 +62,8 @@ def build_recall_pipeline(
             if until:
                 rng["$lt"] = until
             flt["timestamp"] = rng
-        if flt:
-            vs["filter"] = flt
+    if flt:
+        vs["filter"] = flt
 
     pipeline: list[dict[str, Any]] = [
         {"$vectorSearch": vs},

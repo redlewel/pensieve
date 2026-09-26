@@ -28,6 +28,7 @@ The result: agents recall context based on **what actually matters to the user**
 
 Every memory is a **context fragment**: raw text + its embedding + structured metadata. The metadata is what makes Pensieve different from a plain vector DB:
 
+- **`project`** — the **isolation key**. Every read/write/config is scoped to it, so memories never intersect across projects (e.g. `finance` vs `autobiography`). Each project carries its own Dimension Schema.
 - **`categories`** — discrete tags for hard filtering (`finance`, `family`, `outage`). Answers *"is this in scope?"* deterministically.
 - **`domain_weights`** — a map of numeric importance scores on developer-defined axes. Answers *"how much does this matter?"* — the axes are configurable per app, so `emotional_weight` is just one option among many.
 - **`timestamp`** — enables temporal gating and decay.
@@ -98,7 +99,7 @@ Connect with the **standard MongoDB driver** over the SRV connection string. **D
     "emotional_significance": 8.0,
     "strategic_risk": 7.0
   },
-  "domain": "wealth",
+  "project": "finance",                     // isolation key (§3.9)
   "access_count": 12,                       // reinforcement — times recalled (§3.8)
   "last_accessed": "2026-09-20T14:00:00Z",
   "schema_version": 1
@@ -115,6 +116,7 @@ Fields used for pre-filtering **must** be declared as `filter` type in the index
 {
   "fields": [
     { "type": "vector", "path": "embedding", "numDimensions": 1024, "similarity": "cosine" },
+    { "type": "filter", "path": "project" },
     { "type": "filter", "path": "timestamp" },
     { "type": "filter", "path": "categories" }
   ]
@@ -185,7 +187,7 @@ Decay is computed **at query time**, so ranking is always fresh with zero write 
 Each memory is built by **two independent AI calls with different jobs** — don't conflate them:
 
 - **Embedding model** — text → a fixed-length float vector (the `embedding` field). Sets `numDimensions` (Voyage `voyage-3.5` = 1024, OpenAI `text-embedding-3-small` = 1536). Must be the *same model* for ingest and query, or vectors are incomparable.
-- **Extraction model** — an LLM (Claude) that reads the text and returns the structured metadata (`categories[]`, `domain_weights{}`, `timestamp`). Use **schema-validated output** (Claude structured outputs via `messages.parse()` with a fixed per-deployment schema) so every weight is a typed number and `timestamp` is a real date — the gates and scoring depend on clean fields; a stringified weight silently breaks ranking. Numeric range (0–10) can't be enforced by JSON schema, so enforce it in the prompt + a clamp on the way in.
+- **Extraction model** — an LLM that reads the text and returns the structured metadata (`categories[]`, `domain_weights{}`, `timestamp`), scored against the domain's Dimension Schema. Implemented in `pensieve/extraction.py` as a **provider-agnostic seam**: currently **`google/gemini-2.5-flash-lite` via OpenRouter** (OpenAI-compatible API), with a **strict JSON-schema** response so `categories` is an enum array and every weight is typed. Numeric range (0–10) can't be enforced by strict schema, so it's clamped client-side. Swap `settings.extract_model` / the base URL to change provider without touching anything else.
 
 ```python
 def record(raw_text: str):
@@ -196,7 +198,7 @@ def record(raw_text: str):
     col.insert_one(doc)
 ```
 
-Default extraction model: `claude-opus-4-8`. For a large seed, run extraction through the **Batch API (50% cost)** and drop to `claude-haiku-4-5` if throughput matters more than nuance.
+Extraction is cheap at any realistic volume: ~300–600 tokens/record, so even 10k mock records cost well under $1 on `gemini-2.5-flash-lite`. Optimize the model choice for JSON-schema reliability + scoring judgment, not price. For a large seed, parallelize the calls (currently sequential in `/record`).
 
 ### 3.6 Backend API surface
 
@@ -206,11 +208,11 @@ Unify writes; split reads by machinery. All JSON in / JSON out. **Strip `embeddi
 |---|---|---|---|
 | `POST /record` | Write — accepts **one object or an array** | — | inserted IDs |
 | `POST /recall` | Semantic weighted retrieval (§3.4, the core feature) | ✅ | ranked top-N |
-| `POST /memories/query` | Structured browse — filter by time/category, paginate, optionally time-bucket | ❌ | pages of rows |
-| `POST /schema` · `GET /schema` | Define/read the versioned Value-Dimension schema (§3.7) | — | schema + backfill job |
-| `POST /reindex` · `GET /reindex/{job}` | Backfill new dimensions across all records (§3.7) | — | job id / progress |
+| `POST /report` | Project-scoped browse / timeline — filter by category/time, optional bucketing | ❌ | rows or time buckets |
+| `POST /schema` · `GET /schema` | Configure/read a project's versioned Dimension Schema (§3.7, §3.9) | — | schema + version |
+| `POST /reindex` · `GET /reindex/{job}` | Backfill new dimensions across a project's records (§3.7) | — | job id / progress |
 
-`/recall` and `/memories/query` are **separate** on purpose: one needs a query embedding and returns a small ranked set; the other is a plain filtered `find()` returning many paginated (or time-bucketed) rows. A single `mode` flag over both makes the contract ambiguous.
+**Every endpoint takes a required `project`** (§3.9) — it always filters, so nothing crosses project boundaries. `/recall` and `/report` are **separate** on purpose: one needs a query embedding and returns a small ranked set; the other is a plain filtered `find()` returning many rows (optionally time-bucketed). A single `mode` flag over both makes the contract ambiguous.
 
 **Bulk ingest** — batch the embedding calls (many texts per API call) and do one `insert_many`, so onboarding mock data is fast:
 
@@ -271,6 +273,14 @@ Two features that make recall self-tuning and debuggable, implemented in `pensie
 - **Explainable results.** Every hit returns a `score_breakdown { similarity, weight, decay, reinforcement }` next to `final_score`, computed as separate `$addFields` stages. It answers "why did this surface?" for free and drives the demo's per-card score bars (§5).
 
 Both are already in the retrieval pipeline; a caller sees them on every `/recall` response with no extra request.
+
+### 3.9 Project isolation
+
+A **`project`** is the tenant / isolation unit. The three demo datasets are three projects — `finance`, `engineering`, `autobiography` — each with its **own Dimension Schema** and its own memories.
+
+- **Always filters.** `project` is a `filter` field in the index and is applied inside `$vectorSearch` (and every `/report` `$match`) *regardless of `use_gates`* — recall, report, record, and schema config are all scoped to one project, so results never intersect across projects. Verified: a "migrated the database to MongoDB" query returns the MongoDB memory in `engineering` but never leaks it into `finance`.
+- **Schema per project.** `POST /schema {project, categories, dimensions}` configures the value axes for one project and bumps its version; `GET /schema?project=…` reads it. Adding a dimension defines it going forward — existing memories need a `/reindex` backfill (§3.7) to be scored on it.
+- **Model note.** `project` is the isolation key; `domain_weights` keeps its name (the per-dimension importance scores). Distinct concepts: `project` says *whose/which* memory store; `domain_weights` says *how much each axis matters*.
 
 ---
 
@@ -334,7 +344,10 @@ A single-page app over **mock data** that makes the difference between plain RAG
 - [x] **`/record`** (accepts pre-scored metadata + embeds), **`GET /schema`**, `/health` — in `pensieve/app.py`.
 - [x] **Live end-to-end** — M10 cluster seeded (26 memories, 3 schemas, `memory_index`), recall verified: weighting surfaces the seed round / home over lattes on "how's my spending?". Creds auto-load from `*-creds.txt`; `check_connection.py` (smoke test) + `demo_recall.py` (naive-vs-weighted proof) added.
 - [ ] Start the API server (`uvicorn pensieve.app:app`) and exercise `/recall` over HTTP.
-- [ ] Extraction model on `/record`: `claude-opus-4-8` with structured outputs — needs **two modes**: full first-time extraction, and a *score-just-these-axes* mode for backfill (§3.7). Currently `/record` takes pre-scored metadata.
-- [ ] Implement `/schema` upsert + `/reindex` (§3.7) and the background backfill worker.
-- [ ] Implement `/memories/query` structured browse (§3.6).
+- [x] **Extraction on `/record`** — `google/gemini-2.5-flash-lite` via OpenRouter (`pensieve/extraction.py`), strict JSON-schema, client-side clamp. `/record` auto-extracts raw `{text, domain}` and passes pre-scored items straight through. Verified live (lake house → high impact + parsed date; gum → ~0).
+- [ ] Extraction: add a *score-just-these-axes* mode for backfill (§3.7) + parallelize the per-record calls for bulk ingest.
+- [x] **Project isolation** — `project` is a required, always-filtered key on `/recall`, `/report`, `/record`, `/schema`; datasets re-seeded as `finance`/`engineering`/`autobiography`; verified no cross-project leakage (§3.9).
+- [x] **`POST /schema`** (per-project value/weight config, versioned) and **`/report`** (project-scoped browse + time-bucketing) implemented and tested.
+- [x] **Vercel deploy** scaffolding — `index.py` entrypoint, `vercel.json` (maxDuration 60), `DEPLOY.md` (env vars + Atlas `0.0.0.0/0` + gotchas).
+- [ ] `/reindex` backfill worker (§3.7) — must be Vercel Cron / a queue, not an in-process job.
 - [ ] Wire the side-by-side demo UI (partner).

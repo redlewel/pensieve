@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 # Fixed collection / index / model constants — shared by seed.py and the app so
 # there is one source of truth.
@@ -20,6 +21,7 @@ SCHEMAS_COL = "schemas"
 INDEX_NAME = "memory_index"
 EMBED_MODEL = "voyage-3.5"
 EMBED_DIM = 1024              # must equal numDimensions in the vector index
+EXTRACT_MODEL = "google/gemini-2.5-flash-lite"   # OpenRouter slug for extraction
 
 
 @dataclass(frozen=True)
@@ -29,10 +31,12 @@ class Settings:
     embed_endpoint: str
     model: str = EMBED_MODEL
     dim: int = EMBED_DIM
+    openrouter_key: Optional[str] = None          # optional — only needed for extraction
+    extract_model: str = EXTRACT_MODEL
 
 
 # KEY=VALUE credential files at the repo root (gitignored).
-_KEYFILES = ("mongodb-api-key.txt", "mongodb-cluster-creds.txt")
+_KEYFILES = ("mongodb-api-key.txt", "mongodb-cluster-creds.txt", "openrouter-api-key.txt")
 
 
 def _read_keyfiles() -> dict[str, str]:
@@ -58,6 +62,10 @@ def load_settings() -> Settings:
     # cluster URI: env (ATLAS_URI or MONGO_DB_URI) then the creds file
     atlas = (os.environ.get("ATLAS_URI") or os.environ.get("MONGO_DB_URI")
              or kf.get("MONGO_DB_URI") or kf.get("ATLAS_URI"))
+    # OpenRouter key (optional — extraction only). File uses OPENROUTER-API-KEY.
+    orouter = (os.environ.get("OPENROUTER_API_KEY")
+               or kf.get("OPENROUTER_API_KEY") or kf.get("OPENROUTER-API-KEY"))
+    extract_model = os.environ.get("EXTRACT_MODEL", EXTRACT_MODEL)
 
     missing = [name for name, val in
                (("MONGODB_MODEL_API_KEY", key),
@@ -67,4 +75,5 @@ def load_settings() -> Settings:
             "Missing credentials: " + ", ".join(missing)
             + ". Provide via environment or the *-creds.txt files at the repo root."
         )
-    return Settings(atlas_uri=atlas, embed_key=key, embed_endpoint=endpoint)
+    return Settings(atlas_uri=atlas, embed_key=key, embed_endpoint=endpoint,
+                    openrouter_key=orouter, extract_model=extract_model)

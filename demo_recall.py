@@ -16,7 +16,7 @@ from pensieve.embeddings import embed_one
 from pensieve.scoring import build_recall_pipeline
 
 QUERY = "how's my spending?"
-DOMAIN = "wealth"
+PROJECT = "finance"
 DIMENSION = "financial_impact"
 HALF_LIFE = 3650
 
@@ -34,7 +34,7 @@ def run(mem, qvec, w_domain_bias):
     # Both columns are domain-scoped (use_gates=True); only the weight bias
     # differs, so the comparison isolates the effect of importance weighting.
     pipeline = build_recall_pipeline(
-        query_vector=qvec, use_gates=True, domain=DOMAIN, dimension=DIMENSION,
+        query_vector=qvec, use_gates=True, project=PROJECT, dimension=DIMENSION,
         half_life_days=HALF_LIFE, w_domain_bias=w_domain_bias, w_reinforce=0.0, limit=5,
     )
     return list(mem.aggregate(pipeline))
@@ -49,7 +49,7 @@ def main() -> None:
         sys.exit("index not queryable yet — give it another minute and re-run")
 
     qvec = embed_one(QUERY, settings)
-    print(f"\nQuery: {QUERY!r}   (domain={DOMAIN}, bias={DIMENSION})\n")
+    print(f"\nQuery: {QUERY!r}   (project={PROJECT}, bias={DIMENSION})\n")
 
     for label, bias in [("NAIVE  — similarity only", 0.0),
                         ("PENSIEVE — + importance weight", 0.15)]:

@@ -30,7 +30,7 @@ def index_model() -> SearchIndexModel:
             {"type": "vector", "path": "embedding",
              "numDimensions": EMBED_DIM, "similarity": "cosine"},
             # gate fields — declared here so they can pre-filter inside $vectorSearch
-            {"type": "filter", "path": "domain"},
+            {"type": "filter", "path": "project"},      # isolation key
             {"type": "filter", "path": "categories"},
             {"type": "filter", "path": "timestamp"},
         ]},

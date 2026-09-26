@@ -10,3 +10,8 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# Editor swap/temp files (may contain secret file contents)
+*.swp
+*.swo
+*~
