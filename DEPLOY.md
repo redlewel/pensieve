@@ -51,6 +51,23 @@ Variables**:
 Push to the production branch → prod deploy; PRs get preview URLs. CORS is open
 (demo-only — restrict `allow_origins` before any real use).
 
+## Frontend (`Demo-dashboard/`) — a second Vercel project
+The Vite/React dashboard deploys as its **own Vercel project from the same repo**:
+
+- **Root Directory → `Demo-dashboard`** (Framework Preset auto-detects Vite; build
+  `npm run build`, output `dist/`). No `vercel.json` needed — `vite.config.js` registers
+  the React plugin (required for the JSX build).
+- **Set env var `VITE_PENSIEVE_API_URL`** = the backend's deployed URL
+  (`https://<your-backend>.vercel.app`) in the frontend project's Environment Variables.
+  Without it, `src/api.js` uses its built-in default.
+- The frontend calls the backend cross-origin; the backend's open CORS permits it. If you
+  lock CORS down later, add the frontend's domain to `allow_origins`.
+- Deps are **pinned** (Vite 5 / React 18) and `package-lock.json` is committed, so Vercel
+  builds reproducibly. (Avoid `"latest"` — it pulled a broken rolldown build.)
+
+Net: **two Vercel projects, one repo** — backend (Root Directory `backend`) and frontend
+(Root Directory `Demo-dashboard`), pointed at each other via `VITE_PENSIEVE_API_URL`.
+
 ## Serverless gotchas
 - **Atlas network access (critical).** Vercel functions have dynamic egress IPs, so
   your local-machine allowlist entry won't cover them. In Atlas → Network Access, add
