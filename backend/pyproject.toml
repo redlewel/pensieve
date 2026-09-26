@@ -1,0 +1,10 @@
+# Vercel entrypoint disambiguation.
+#
+# Vercel finds `app` in both index.py and pensieve/app.py and can't choose.
+# This points it at index.py's `app` (which re-exports pensieve.app:app).
+#
+# NOTE: the Vercel project's Root Directory MUST be set to `backend`. With that,
+# the entrypoint is "index:app" (relative to backend/). Dependencies are still
+# installed from requirements.txt — this file only configures the entrypoint.
+[tool.vercel]
+entrypoint = "index:app"
