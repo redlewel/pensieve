@@ -1,10 +1,27 @@
-# Vercel entrypoint disambiguation.
+# Backend project metadata for Vercel's uv-based Python builder.
 #
-# Vercel finds `app` in both index.py and pensieve/app.py and can't choose.
-# This points it at index.py's `app` (which re-exports pensieve.app:app).
+# `uv lock` requires a [project] table, so dependencies live here (they mirror
+# requirements.txt, which stays for local `pip install -r`). `[tool.uv] package
+# = false` tells uv this is an application, not an installable package — it
+# resolves/installs the deps but does not try to build a wheel.
 #
-# NOTE: the Vercel project's Root Directory MUST be set to `backend`. With that,
-# the entrypoint is "index:app" (relative to backend/). Dependencies are still
-# installed from requirements.txt — this file only configures the entrypoint.
+# `[tool.vercel] entrypoint` disambiguates the FastAPI app (index.py re-exports
+# pensieve.app:app). Requires the Vercel project's Root Directory = backend.
+
+[project]
+name = "pensieve-backend"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "pymongo>=4.5",
+    "requests>=2.31",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "openai>=1.40",
+]
+
+[tool.uv]
+package = false
+
 [tool.vercel]
 entrypoint = "index:app"
