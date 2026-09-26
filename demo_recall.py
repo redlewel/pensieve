@@ -35,7 +35,7 @@ def run(mem, qvec, w_domain_bias):
     # differs, so the comparison isolates the effect of importance weighting.
     pipeline = build_recall_pipeline(
         query_vector=qvec, use_gates=True, project=PROJECT, dimension=DIMENSION,
-        half_life_days=HALF_LIFE, w_domain_bias=w_domain_bias, w_reinforce=0.0, limit=5,
+        w_domain_bias=w_domain_bias, w_reinforce=0.0, limit=5,
     )
     return list(mem.aggregate(pipeline))
 

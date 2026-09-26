@@ -94,10 +94,15 @@ Connect with the **standard MongoDB driver** over the SRV connection string. **D
   "embedding": [0.012, -0.043, 0.219, /* … 1024 or 1536 dims … */],
   "timestamp": "2025-11-14T10:30:00Z",
   "categories": ["finance", "fundraising", "milestone"],
-  "domain_weights": {
+  "domain_weights": {                       // BASE importance — immutable, LLM-assigned
     "financial_impact": 9.5,
     "emotional_significance": 8.0,
     "strategic_risk": 7.0
+  },
+  "current_weights": {                      // decayed by the decay task (§3.4 Step 3); recall ranks by this
+    "financial_impact": 8.71,
+    "emotional_significance": 6.20,
+    "strategic_risk": 5.90
   },
   "project": "finance",                     // isolation key (§3.9)
   "access_count": 12,                       // reinforcement — times recalled (§3.8)
@@ -145,30 +150,29 @@ The gate is the **`filter` field *inside* `$vectorSearch`**, not a later `$match
 }
 ```
 
-**Step 2 — compute the decay-adjusted weighted `FinalScore`.**
+**Step 2 — compute the weighted `FinalScore`.**
 
 ```
 FinalScore = (Sim · w_vector)
-           + (W_domain · w_domain_bias · Decay(Δt))
+           + (Weight · w_domain_bias)
            + (Reinforcement · w_reinforce)
 ```
 
-where `Sim` = `$vectorSearchScore`, `W_domain` = the selected dimension's weight, `Decay(Δt) = exp(−Δt / half_life)`, and `Reinforcement = ln(1 + access_count)` (§3.8). Tunable per query: raise `w_domain_bias` to favor importance, `w_vector` for topical closeness, `w_reinforce` to favor memories the agent keeps using.
+where `Sim` = `$vectorSearchScore`, `Weight` = the selected dimension's **`current_weights`** value (the base `domain_weights` already degraded by the decay task — Step 3), and `Reinforcement = ln(1 + access_count)` (§3.8). **Decay is applied in storage, not here** — recall just reads the pre-decayed value. Tunable per query: raise `w_domain_bias` to favor importance, `w_vector` for topical closeness, `w_reinforce` to favor memories the agent keeps using.
 
 ```jsonc
 [
   { "$addFields": {
       "sim": { "$meta": "vectorSearchScore" },
-      "age_days": { "$dateDiff": { "startDate": "$timestamp", "endDate": "$$NOW", "unit": "day" } },
-      "weight": { "$ifNull": ["$domain_weights.financial_impact", 0] },
+      "weight": { "$ifNull": ["$current_weights.financial_impact",
+                              { "$ifNull": ["$domain_weights.financial_impact", 0] }] },
       "reinforcement": { "$ln": [ { "$add": [1, { "$ifNull": ["$access_count", 0] }] } ] } } },
-  { "$addFields": { "decay": { "$exp": { "$multiply": [-1, { "$divide": ["$age_days", 3650] }] } } } },
   { "$addFields": {
       "score_breakdown": { "similarity": "$sim", "weight": "$weight",
-                           "decay": "$decay", "reinforcement": "$reinforcement" },   // §3.8 explainability
+                           "reinforcement": "$reinforcement" },   // §3.8 explainability
       "final_score": { "$add": [
           { "$multiply": ["$sim", 1.0] },
-          { "$multiply": ["$weight", 0.15, "$decay"] },
+          { "$multiply": ["$weight", 0.15] },
           { "$multiply": ["$reinforcement", 0.1] } ] } } },
   { "$sort":    { "final_score": -1 } },
   { "$limit":   10 },
@@ -176,11 +180,11 @@ where `Sim` = `$vectorSearchScore`, `W_domain` = the selected dimension's weight
 ]
 ```
 
-This pipeline is built by `pensieve/scoring.py::build_recall_pipeline`; the `use_gates=false` path drops the filter and ranks by `sim` alone (the demo's naive-RAG column).
+This pipeline is built by `pensieve/scoring.py::build_recall_pipeline`; the `use_gates=false` path drops the category/time gates and ranks by `sim` alone (the demo's naive column). A dedicated **`POST /raw_recall`** endpoint does the same plain-Voyage search with none of the weighting (§3.6).
 
-**Step 3 — lifecycle maintenance (optional, decoupled from ranking).**
+**Step 3 — decay as a repeated task (writes `current_weights`).**
 
-Decay is computed **at query time**, so ranking is always fresh with zero write amplification and no stale scores — this is the correction to the original "Atlas Trigger recomputes decay" idea. Because Atlas Scheduled/Database Triggers live in Atlas App Services (on a deprecation path), run any *coarse* maintenance — archiving truly-dead low-weight memories to a cold collection, recomputing weights on recurrence — as an **external scheduled job** (cron / serverless function / Temporal), not as the ranking mechanism.
+Decay is a **scheduled task**, not a query-time value (`pensieve/decay.py`, exposed as **`GET /decay`** for Vercel Cron). Each run rewrites every memory's **`current_weights` = base `domain_weights` × exp(−age / half_life)** per dimension, using each project's schema half-lives. Recall (Step 2) ranks by `current_weights`; the base `domain_weights` is **never modified**, so decay is **lossless and idempotent** — every run recomputes from the base, no drift, and you can reset or re-derive at any time. Short half-lives (e.g. `liquidity_risk`, 365 d) fade fast; long ones (`financial_impact`, 3650 d) barely move — the "mundane fades, milestone stays" behavior, now persisted in storage rather than recomputed per query. (This reverses the earlier query-time approach per the requirement that decay mutate stored values on a schedule.)
 
 ### 3.5 Two models on the write path
 
@@ -208,9 +212,11 @@ Unify writes; split reads by machinery. All JSON in / JSON out. **Strip `embeddi
 |---|---|---|---|
 | `POST /record` | Write — accepts **one object or an array** | — | inserted IDs |
 | `POST /recall` | Semantic weighted retrieval (§3.4, the core feature) | ✅ | ranked top-N |
+| `POST /raw_recall` | Plain Voyage similarity — no weights/decay/reinforcement (demo baseline, §3.4) | ✅ | ranked by similarity |
 | `POST /report` | Project-scoped browse / timeline — filter by category/time, optional bucketing | ❌ | rows or time buckets |
 | `POST /schema` · `GET /schema` | Configure/read a project's versioned Dimension Schema (§3.7, §3.9) | — | schema + version |
 | `POST /reindex` · `GET /reindex/{job}` | Backfill new dimensions across a project's records (§3.7) | — | job id / progress |
+| `GET /decay` | Repeated decay task — rewrites `current_weights` from base × age (Vercel Cron, §3.4) | — | `{updated, per_project}` |
 
 **Every endpoint takes a required `project`** (§3.9) — it always filters, so nothing crosses project boundaries. `/recall` and `/report` are **separate** on purpose: one needs a query embedding and returns a small ranked set; the other is a plain filtered `find()` returning many rows (optionally time-bucketed). A single `mode` flag over both makes the contract ambiguous.
 
@@ -268,9 +274,9 @@ class DimensionSchema(BaseModel):
 
 Two features that make recall self-tuning and debuggable, implemented in `pensieve/scoring.py`:
 
-- **Recall reinforcement (self-tuning importance).** Each memory carries `access_count` + `last_accessed`. Every *gated* `/recall` follows the result read with a `bulk_write` (`$inc access_count`, `$set last_accessed`) on the returned docs, and `FinalScore` adds `w_reinforce · ln(1 + access_count)`. Memories the agent keeps needing rise; unused ones fade faster. It's **incremental** — no batch job, no LLM — and **neutral at `access_count = 0`** (`ln 1 = 0`), so fresh records aren't penalized. The naive-RAG demo column passes `reinforce=false` so the comparison doesn't skew the counts. This is the reason *not* to cron-rescore weights: importance-from-usage updates itself, one cheap write per recall.
+- **Recall reinforcement (self-tuning importance).** Each memory carries `access_count` + `last_accessed`. Every *gated* `/recall` follows the result read with a `bulk_write` (`$inc access_count`, `$set last_accessed`) on the returned docs, and `FinalScore` adds `w_reinforce · ln(1 + access_count)`. Memories the agent keeps needing rise; unused ones fade faster. It's **incremental** — no batch job, no LLM — and **neutral at `access_count = 0`** (`ln 1 = 0`), so fresh records aren't penalized. The naive-RAG demo column passes `reinforce=false` so the comparison doesn't skew the counts. Reinforcement is **event-driven** (on recall); time decay is its **scheduled** counterpart (§3.4 Step 3) — together they keep `current_weights` current from both usage and age.
 
-- **Explainable results.** Every hit returns a `score_breakdown { similarity, weight, decay, reinforcement }` next to `final_score`, computed as separate `$addFields` stages. It answers "why did this surface?" for free and drives the demo's per-card score bars (§5).
+- **Explainable results.** Every hit returns a `score_breakdown { similarity, weight, reinforcement }` next to `final_score` (`weight` is the decayed `current_weights` value). It answers "why did this surface?" for free and drives the demo's per-card score bars (§5). The `/raw_recall` baseline returns only `similarity` — no breakdown.
 
 Both are already in the retrieval pipeline; a caller sees them on every `/recall` response with no extra request.
 
@@ -348,6 +354,8 @@ A single-page app over **mock data** that makes the difference between plain RAG
 - [ ] Extraction: add a *score-just-these-axes* mode for backfill (§3.7) + parallelize the per-record calls for bulk ingest.
 - [x] **Project isolation** — `project` is a required, always-filtered key on `/recall`, `/report`, `/record`, `/schema`; datasets re-seeded as `finance`/`engineering`/`autobiography`; verified no cross-project leakage (§3.9).
 - [x] **`POST /schema`** (per-project value/weight config, versioned) and **`/report`** (project-scoped browse + time-bucketing) implemented and tested.
-- [x] **Vercel deploy** scaffolding — `index.py` entrypoint, `vercel.json` (maxDuration 60), `DEPLOY.md` (env vars + Atlas `0.0.0.0/0` + gotchas).
+- [x] **Vercel deploy** scaffolding — `index.py` entrypoint, `vercel.json` (maxDuration 60 + `/decay` cron), `DEPLOY.md` (env vars + Atlas `0.0.0.0/0` + gotchas).
+- [x] **Decay as a scheduled task** — `pensieve/decay.py` rewrites `current_weights` from base `domain_weights` × age; `GET /decay` (Vercel Cron) + `decay.py` CLI. Recall ranks by `current_weights`; base is immutable. Verified.
+- [x] **`/raw_recall`** — plain Voyage similarity baseline (no weights/decay/reinforcement/gates), optional filters; for the demo's "less accurate" column.
 - [ ] `/reindex` backfill worker (§3.7) — must be Vercel Cron / a queue, not an in-process job.
 - [ ] Wire the side-by-side demo UI (partner).

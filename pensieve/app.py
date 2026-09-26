@@ -30,9 +30,10 @@ from pydantic import BaseModel
 
 from .config import load_settings
 from .db import get_client, memories, schemas
+from .decay import run_decay
 from .embeddings import embed_batch, embed_one
 from .extraction import extract_many
-from .scoring import build_recall_pipeline, bump_access
+from .scoring import build_raw_pipeline, build_recall_pipeline, bump_access
 
 settings = load_settings()
 # Fail fast on a bad/unreachable cluster instead of hanging a serverless function.
@@ -72,6 +73,15 @@ class RecallRequest(BaseModel):
     limit: int = 10
     use_gates: bool = True                        # False = naive similarity-only column
     reinforce: Optional[bool] = None              # default: only when gated
+
+
+class RawRecallRequest(BaseModel):
+    query: str
+    project: Optional[str] = None                 # optional filter (omit = all projects)
+    categories: Optional[list[str]] = None
+    since: Optional[datetime] = None
+    until: Optional[datetime] = None
+    limit: int = 10
 
 
 class ReportRequest(BaseModel):
@@ -156,20 +166,11 @@ def record(payload: Memory | list[Memory]):
 
 @app.post("/recall")
 def recall(req: RecallRequest):
-    # Pull the decay half-life for the biasing dimension from the project schema.
-    half_life = 365.0
-    if req.use_gates and req.dimension:
-        schema = _sch.find_one({"_id": req.project}) or {}
-        dim = (schema.get("dimensions") or {}).get(req.dimension)
-        if dim:
-            half_life = dim.get("decay_half_life_days", 365)
-
     qvec = embed_one(req.query, settings, input_type="query")
     pipeline = build_recall_pipeline(
         query_vector=qvec, use_gates=req.use_gates,
         project=req.project, dimension=req.dimension,
         categories=req.categories, since=req.since, until=req.until,
-        half_life_days=half_life,
         w_vector=req.w_vector, w_domain_bias=req.w_domain_bias,
         w_reinforce=req.w_reinforce, limit=req.limit,
     )
@@ -180,6 +181,20 @@ def recall(req: RecallRequest):
     if reinforce:
         bump_access(_mem, [r["_id"] for r in results])
 
+    for r in results:
+        r["_id"] = str(r["_id"])
+    return {"results": results}
+
+
+@app.post("/raw_recall")
+def raw_recall(req: RawRecallRequest):
+    """Plain Voyage vector search — no weighting, decay, reinforcement, or gates.
+    The intentionally 'less accurate' baseline for the demo comparison. Each result
+    carries only `similarity` (no score_breakdown)."""
+    qvec = embed_one(req.query, settings, input_type="query")
+    results = list(_mem.aggregate(build_raw_pipeline(
+        query_vector=qvec, project=req.project, categories=req.categories,
+        since=req.since, until=req.until, limit=req.limit)))
     for r in results:
         r["_id"] = str(r["_id"])
     return {"results": results}
@@ -251,3 +266,11 @@ def get_schema(project: Optional[str] = None):
             raise HTTPException(404, f"no schema for project '{project}'")
         return doc
     return list(_sch.find())
+
+
+@app.get("/decay")
+def decay():
+    """Repeated decay task: rewrite every memory's current_weights from its base
+    domain_weights and age. Idempotent — wire to Vercel Cron (see vercel.json).
+    Protect with a CRON_SECRET check before exposing publicly."""
+    return run_decay(_mem, _sch)
