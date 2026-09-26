@@ -5,6 +5,11 @@ per dimension, using each project's schema half-lives. Recall ranks by
 `current_weights`; the base `domain_weights` is never modified — so decay is
 **lossless and idempotent** (every run recomputes from the base, no drift).
 
+Also writes a single high-level **`relevance`** scalar = max(current_weights) — a
+coarse "how much does this still matter" score. It's low only when a memory is
+**old *and* unimportant on every axis**; a recent milestone (or an old one on a
+long-half-life axis) stays high. Use it to sort/prune from a bird's-eye view.
+
 Run it on a schedule (Vercel Cron → GET /decay, or `python decay.py`).
 """
 
@@ -46,8 +51,12 @@ def run_decay(mem: Collection, sch: Collection) -> dict:
             half_life = cfg.get("decay_half_life_days", 365) or 365
             factor = math.exp(-age / half_life)
             current[name] = round(base.get(name, cfg.get("default", 0)) * factor, 4)
+        # High-level relevance: strongest current importance on any axis. Low only
+        # when the memory is old AND unimportant everywhere.
+        relevance = round(max(current.values()), 4) if current else 0.0
         ops.append(UpdateOne({"_id": doc["_id"]},
-                             {"$set": {"current_weights": current, "decayed_at": now}}))
+                             {"$set": {"current_weights": current,
+                                       "relevance": relevance, "decayed_at": now}}))
         per_project[doc["project"]] = per_project.get(doc["project"], 0) + 1
 
     for i in range(0, len(ops), _CHUNK):

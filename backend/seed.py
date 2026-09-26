@@ -63,6 +63,12 @@ def _m(project, text, ts, categories, weights):
             "access_count": 0, "last_accessed": None, "schema_version": 1}
 
 
+def _a(project, text, ts, categories, weights):
+    # Guaranteed demo anchor — tagged so it survives generated-data regeneration
+    # (generate_data.py only clears source="llm").
+    return {**_m(project, text, ts, categories, weights), "anchor": True}
+
+
 # ------------------------------------------------------------- mock memories ---
 # Deliberately mixes high-weight milestones with low-weight noise that shares
 # keywords, so weighting visibly beats plain similarity.
@@ -124,6 +130,31 @@ RAW_MEMORIES = [
        ["career"], {"emotional_significance": 0.6, "relationship_impact": 0.5, "life_milestone_tier": 0.0}),
     _m("autobiography", "Booked a weekend cabin getaway.", "2026-07-18T12:00:00",
        ["travel"], {"emotional_significance": 2.5, "relationship_impact": 2.0, "life_milestone_tier": 0.5}),
+
+    # --- GUARANTEED DEMO ANCHORS -------------------------------------------------
+    # Recent, top-weighted, curated. Ensure the example demo questions always
+    # return strong answers no matter what the generated data looks like.
+    # finance — "what should I be paying attention to?"
+    _a("finance", "Closed a $2M Series A — the company is now funded for two years.", "2026-08-25T10:00:00",
+       ["income", "investment"], {"financial_impact": 10, "liquidity_risk": 4, "tax_relevance": 7}),
+    _a("finance", "Bought our family home for $850k — the largest financial commitment of our lives.", "2026-05-10T09:00:00",
+       ["spending", "debt"], {"financial_impact": 9.8, "liquidity_risk": 7, "tax_relevance": 6}),
+    _a("finance", "Cashed out company stock in the IPO — a life-changing sum after taxes.", "2025-11-15T14:00:00",
+       ["income", "investment", "tax"], {"financial_impact": 10, "liquidity_risk": 2, "tax_relevance": 9}),
+    # engineering — "what changed in the project?"
+    _a("engineering", "Completed the platform cutover — the largest release in the company's history.", "2026-08-25T15:00:00",
+       ["decision", "roadmap"], {"strategic_risk": 10, "architectural_impact": 10, "team_dependency": 9}),
+    _a("engineering", "Severe production outage: payments were down for 3 hours during peak sales.", "2026-05-10T02:30:00",
+       ["outage"], {"strategic_risk": 9.5, "architectural_impact": 6, "team_dependency": 9}),
+    _a("engineering", "Re-sharded the core database onto a new cluster — our biggest architectural change.", "2025-11-15T16:00:00",
+       ["decision", "refactor"], {"strategic_risk": 9, "architectural_impact": 10, "team_dependency": 7}),
+    # autobiography — "what's been going on in my life?"
+    _a("autobiography", "Our first child was born — the most profound moment of my life.", "2026-08-25T04:00:00",
+       ["family"], {"emotional_significance": 10, "relationship_impact": 10, "life_milestone_tier": 10}),
+    _a("autobiography", "Got married surrounded by everyone we love.", "2026-05-10T17:00:00",
+       ["family"], {"emotional_significance": 10, "relationship_impact": 10, "life_milestone_tier": 10}),
+    _a("autobiography", "Lost my father after a long illness — a turning point I'll never forget.", "2025-11-15T20:00:00",
+       ["family", "health"], {"emotional_significance": 9.8, "relationship_impact": 9.5, "life_milestone_tier": 8}),
 ]
 
 

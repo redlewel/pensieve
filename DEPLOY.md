@@ -4,15 +4,29 @@ The FastAPI app deploys as a Vercel Function. It's serverless-friendly by design
 all state lives in MongoDB Atlas (reinforcement counts included), there are no
 background jobs in the request path, and nothing writes to the local filesystem.
 
+## 0. Monorepo — set the Root Directory
+All backend code lives in **`backend/`**. In **Vercel → Project → Settings → General →
+Root Directory**, set it to **`backend`**. Vercel then treats `backend/` as the project
+root and finds `index.py`, `requirements.txt`, and `vercel.json` there. Everything below
+is relative to `backend/`.
+
+```
+repo/
+  backend/        ← Vercel Root Directory = this
+    index.py  vercel.json  requirements.txt  pensieve/  seed.py  …
+  frontend/       ← (your partner's app; its own Vercel project or root dir)
+  SPEC.md  DEPLOY.md
+```
+
 ## 1. Entrypoint
-`index.py` (repo root) re-exports the app so Vercel auto-detects it:
+`backend/index.py` re-exports the app so Vercel auto-detects it:
 
 ```python
 from pensieve.app import app
 ```
 
-Vercel's FastAPI preset scans `app.py` / `index.py` / `server.py`; our real app
-lives in `pensieve/app.py`, hence the re-export.
+Vercel's FastAPI preset scans `app.py` / `index.py` / `server.py` (relative to the Root
+Directory); our real app lives in `pensieve/app.py`, hence the re-export.
 
 ## 2. Environment variables
 Secrets are **not** deployed — the `*-key.txt` / `*-creds.txt` files are gitignored.
@@ -31,7 +45,7 @@ Variables**:
 > at import → the function fails to boot and every route 500s. Set them before deploy.
 
 ## 3. Dependencies
-`requirements.txt` at the repo root (pymongo, requests, fastapi, openai). Python 3.12+.
+`backend/requirements.txt` (pymongo, requests, fastapi, openai). Python 3.12+.
 
 ## 4. Deploy
 Push to the production branch → prod deploy; PRs get preview URLs. CORS is open
@@ -46,9 +60,10 @@ Push to the production branch → prod deploy; PRs get preview URLs. CORS is ope
 - **Duration limit.** A large bulk `/record` POST fires many LLM extraction calls;
   it can exceed the function timeout. `vercel.json` sets `maxDuration: 60`; keep
   bulk batches small (`bulk_ingest.py --batch 15`) or raise the limit on a paid plan.
-- **Local scripts stay local.** `seed.py`, `demo_recall.py`, `bulk_ingest.py`, and
-  `check_connection.py` are tooling — run them from your machine against Atlas, not
-  on Vercel. (Seeding is a one-time local step; it's already done.)
+- **Local scripts stay local.** `seed.py`, `demo_recall.py`, `bulk_ingest.py`,
+  `generate_data.py`, `decay.py`, and `check_connection.py` are tooling — run them from
+  `backend/` (`cd backend && python seed.py`) against Atlas, not on Vercel. (Seeding is a
+  one-time step; it's already done.)
 - **Future `/reindex` backfill must not be an in-process background job here.** Use
   Vercel Cron (or a queue) to invoke a backfill endpoint on a schedule instead.
 - **Cold starts** rebuild the Mongo client + settings each time — fine for a demo.
