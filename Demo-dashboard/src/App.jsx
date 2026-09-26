@@ -55,7 +55,7 @@ function mockResults(project, dimensions, schema, dimensionBiases, dateRange) {
     const similarity = item.sim;
     const domainScore = Object.values(dimensionBreakdowns).reduce((sum, part) => sum + part.contribution, 0);
     return { ...item, age_days: ageDays, dimension_breakdowns: dimensionBreakdowns, final_score: similarity + domainScore, score_breakdown: { similarity: item.sim } };
-  }).sort((a, b) => b.final_score - a.final_score).slice(0, 5);
+  }).sort((a, b) => b.final_score - a.final_score).slice(0, resultLimit);
   return { naive, weighted };
 }
 
@@ -255,7 +255,7 @@ function App() {
           const reinforcement = Math.log1p(Number(item.access_count ?? 0)) * 0.1;
           const domainScore = Object.values(item.dimension_breakdowns).reduce((sum, part) => sum + part.contribution, 0);
           return { ...item, final_score: similarity + domainScore + reinforcement, score_breakdown: { similarity, reinforcement, ...item.score_breakdown } };
-        }).sort((a, b) => b.final_score - a.final_score).slice(0, 5);
+        }).sort((a, b) => b.final_score - a.final_score).slice(0, resultLimit);
         setWeightedResults(ranked);
         setWeightedState('ready');
         setWeightedError('');
