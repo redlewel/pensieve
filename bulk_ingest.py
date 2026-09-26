@@ -1,4 +1,4 @@
-"""Generate N fake wealth-domain memories and POST them to /record.
+"""Generate N fake finance-project memories and POST them to /record.
 
 Payloads are raw text with no metadata, so the server auto-extracts each via the
 LLM — a real stress test of the concurrent, partial-success ingest path.

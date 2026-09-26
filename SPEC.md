@@ -180,7 +180,7 @@ where `Sim` = `$vectorSearchScore`, `Weight` = the selected dimension's **`curre
 ]
 ```
 
-This pipeline is built by `pensieve/scoring.py::build_recall_pipeline`; the `use_gates=false` path drops the category/time gates and ranks by `sim` alone (the demo's naive column). A dedicated **`POST /raw_recall`** endpoint does the same plain-Voyage search with none of the weighting (§3.6).
+This pipeline is built by `pensieve/scoring.py::build_recall_pipeline`; `use_gates=false` drops the category/time gates. The demo's naive baseline is the **separate `POST /raw_recall`** endpoint — plain Voyage similarity with none of the weighting (§3.6). So the two recall-family endpoints are `/recall` (weighted) and `/raw_recall` (naive).
 
 **Step 3 — decay as a repeated task (writes `current_weights`).**
 
@@ -274,7 +274,7 @@ class DimensionSchema(BaseModel):
 
 Two features that make recall self-tuning and debuggable, implemented in `pensieve/scoring.py`:
 
-- **Recall reinforcement (self-tuning importance).** Each memory carries `access_count` + `last_accessed`. Every *gated* `/recall` follows the result read with a `bulk_write` (`$inc access_count`, `$set last_accessed`) on the returned docs, and `FinalScore` adds `w_reinforce · ln(1 + access_count)`. Memories the agent keeps needing rise; unused ones fade faster. It's **incremental** — no batch job, no LLM — and **neutral at `access_count = 0`** (`ln 1 = 0`), so fresh records aren't penalized. The naive-RAG demo column passes `reinforce=false` so the comparison doesn't skew the counts. Reinforcement is **event-driven** (on recall); time decay is its **scheduled** counterpart (§3.4 Step 3) — together they keep `current_weights` current from both usage and age.
+- **Recall reinforcement (self-tuning importance).** Each memory carries `access_count` + `last_accessed`. Every *gated* `/recall` follows the result read with a `bulk_write` (`$inc access_count`, `$set last_accessed`) on the returned docs, and `FinalScore` adds `w_reinforce · ln(1 + access_count)`. Memories the agent keeps needing rise; unused ones fade faster. It's **incremental** — no batch job, no LLM — and **neutral at `access_count = 0`** (`ln 1 = 0`), so fresh records aren't penalized. The `/raw_recall` baseline never touches `access_count`, so running the two columns side-by-side doesn't skew the counts. Reinforcement is **event-driven** (on recall); time decay is its **scheduled** counterpart (§3.4 Step 3) — together they keep `current_weights` current from both usage and age.
 
 - **Explainable results.** Every hit returns a `score_breakdown { similarity, weight, reinforcement }` next to `final_score` (`weight` is the decayed `current_weights` value). It answers "why did this surface?" for free and drives the demo's per-card score bars (§5). The `/raw_recall` baseline returns only `similarity` — no breakdown.
 

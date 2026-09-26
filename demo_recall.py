@@ -18,7 +18,6 @@ from pensieve.scoring import build_recall_pipeline
 QUERY = "how's my spending?"
 PROJECT = "finance"
 DIMENSION = "financial_impact"
-HALF_LIFE = 3650
 
 
 def wait_ready(mem) -> bool:
