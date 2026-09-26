@@ -97,15 +97,19 @@ Connect with the **standard MongoDB driver** over the SRV connection string. **D
     "financial_impact": 9.5,
     "emotional_significance": 8.0,
     "strategic_risk": 7.0
-  }
+  },
+  "domain": "wealth",
+  "access_count": 12,                       // reinforcement — times recalled (§3.8)
+  "last_accessed": "2026-09-20T14:00:00Z",
+  "schema_version": 1
 }
 ```
 
-The embedding array **and** the scoring metadata live in the same document — one round trip, one atomic write, no join.
+The embedding array **and** the scoring metadata live in the same document — one round trip, one atomic write, no join. `access_count` / `last_accessed` power recall reinforcement (§3.8); `schema_version` tracks which Dimension-Schema version a record has been scored against (§3.7).
 
 ### 3.3 Vector Search index
 
-Fields used for pre-filtering **must** be declared as `filter` type in the index, or they can't gate the ANN search. `numDimensions` must match the embedding model (Voyage `voyage-3` = 1024; OpenAI `text-embedding-3-small` = 1536).
+Fields used for pre-filtering **must** be declared as `filter` type in the index, or they can't gate the ANN search. `numDimensions` must match the embedding model (Voyage `voyage-3.5` = 1024; OpenAI `text-embedding-3-small` = 1536).
 
 ```jsonc
 {
@@ -142,32 +146,35 @@ The gate is the **`filter` field *inside* `$vectorSearch`**, not a later `$match
 **Step 2 — compute the decay-adjusted weighted `FinalScore`.**
 
 ```
-FinalScore = (Sim · w_vector) + (W_domain · w_domain_bias · Decay(Δt)) − noise_floor
+FinalScore = (Sim · w_vector)
+           + (W_domain · w_domain_bias · Decay(Δt))
+           + (Reinforcement · w_reinforce)
 ```
 
-where `Sim` = `$vectorSearchScore`, `W_domain` = the selected dimension's weight, and `Decay(Δt) = exp(−Δt / half_life)`. Tunable per query: raise `w_domain_bias` to favor importance, raise `w_vector` to favor topical closeness.
+where `Sim` = `$vectorSearchScore`, `W_domain` = the selected dimension's weight, `Decay(Δt) = exp(−Δt / half_life)`, and `Reinforcement = ln(1 + access_count)` (§3.8). Tunable per query: raise `w_domain_bias` to favor importance, `w_vector` for topical closeness, `w_reinforce` to favor memories the agent keeps using.
 
 ```jsonc
 [
-  { "$addFields": { "sim": { "$meta": "vectorSearchScore" },
-                    "age_days": { "$dateDiff": { "startDate": "$timestamp", "endDate": "$$NOW", "unit": "day" } } } },
   { "$addFields": {
-      "final_score": {
-        "$add": [
+      "sim": { "$meta": "vectorSearchScore" },
+      "age_days": { "$dateDiff": { "startDate": "$timestamp", "endDate": "$$NOW", "unit": "day" } },
+      "weight": { "$ifNull": ["$domain_weights.financial_impact", 0] },
+      "reinforcement": { "$ln": [ { "$add": [1, { "$ifNull": ["$access_count", 0] }] } ] } } },
+  { "$addFields": { "decay": { "$exp": { "$multiply": [-1, { "$divide": ["$age_days", 3650] }] } } } },
+  { "$addFields": {
+      "score_breakdown": { "similarity": "$sim", "weight": "$weight",
+                           "decay": "$decay", "reinforcement": "$reinforcement" },   // §3.8 explainability
+      "final_score": { "$add": [
           { "$multiply": ["$sim", 1.0] },
-          { "$multiply": [
-              { "$ifNull": ["$domain_weights.financial_impact", 0] },
-              0.15,
-              { "$exp": { "$multiply": [-1, { "$divide": ["$age_days", 3650] }] } }
-          ] }
-        ]
-      }
-  } },
+          { "$multiply": ["$weight", 0.15, "$decay"] },
+          { "$multiply": ["$reinforcement", 0.1] } ] } } },
   { "$sort":    { "final_score": -1 } },
   { "$limit":   10 },
   { "$project": { "embedding": 0 } }
 ]
 ```
+
+This pipeline is built by `pensieve/scoring.py::build_recall_pipeline`; the `use_gates=false` path drops the filter and ranks by `sim` alone (the demo's naive-RAG column).
 
 **Step 3 — lifecycle maintenance (optional, decoupled from ranking).**
 
@@ -177,7 +184,7 @@ Decay is computed **at query time**, so ranking is always fresh with zero write 
 
 Each memory is built by **two independent AI calls with different jobs** — don't conflate them:
 
-- **Embedding model** — text → a fixed-length float vector (the `embedding` field). Sets `numDimensions` (Voyage `voyage-3` = 1024, OpenAI `text-embedding-3-small` = 1536). Must be the *same model* for ingest and query, or vectors are incomparable.
+- **Embedding model** — text → a fixed-length float vector (the `embedding` field). Sets `numDimensions` (Voyage `voyage-3.5` = 1024, OpenAI `text-embedding-3-small` = 1536). Must be the *same model* for ingest and query, or vectors are incomparable.
 - **Extraction model** — an LLM (Claude) that reads the text and returns the structured metadata (`categories[]`, `domain_weights{}`, `timestamp`). Use **schema-validated output** (Claude structured outputs via `messages.parse()` with a fixed per-deployment schema) so every weight is a typed number and `timestamp` is a real date — the gates and scoring depend on clean fields; a stringified weight silently breaks ranking. Numeric range (0–10) can't be enforced by JSON schema, so enforce it in the prompt + a clamp on the way in.
 
 ```python
@@ -200,6 +207,8 @@ Unify writes; split reads by machinery. All JSON in / JSON out. **Strip `embeddi
 | `POST /record` | Write — accepts **one object or an array** | — | inserted IDs |
 | `POST /recall` | Semantic weighted retrieval (§3.4, the core feature) | ✅ | ranked top-N |
 | `POST /memories/query` | Structured browse — filter by time/category, paginate, optionally time-bucket | ❌ | pages of rows |
+| `POST /schema` · `GET /schema` | Define/read the versioned Value-Dimension schema (§3.7) | — | schema + backfill job |
+| `POST /reindex` · `GET /reindex/{job}` | Backfill new dimensions across all records (§3.7) | — | job id / progress |
 
 `/recall` and `/memories/query` are **separate** on purpose: one needs a query embedding and returns a small ranked set; the other is a plain filtered `find()` returning many paginated (or time-bucketed) rows. A single `mode` flag over both makes the contract ambiguous.
 
@@ -223,6 +232,45 @@ def record(payload: Memory | list[Memory]):
                 "memories": {"$push": "$$ROOT"} } },
   { "$sort": { "_id": 1 } } ]
 ```
+
+### 3.7 Value Dimensions: schema definition + backfill
+
+Value Dimensions are declared **ahead of time** via a versioned schema, then scored onto records. The key insight: **adding a dimension is a metadata backfill, not a vector re-index.** Embeddings are unchanged — you re-run the *extraction model* on each record's stored `text`, scoring only the new axis, and `$set` one field.
+
+```python
+class Dimension(BaseModel):
+    range: tuple[float, float] = (0, 10)
+    decay_half_life_days: int = 365
+    default: float = 1
+
+class DimensionSchema(BaseModel):
+    categories: list[str]
+    dimensions: dict[str, Dimension]   # e.g. {"financial_impact": Dimension(...), ...}
+```
+
+**Endpoints** (see the table in §3.6):
+- `POST /schema` — upsert the schema (versioned); auto-enqueues a backfill for any newly added dimensions.
+- `GET /schema` — read the active schema.
+- `POST /reindex {dimensions:[...]}` — trigger/re-run a backfill; returns a job id immediately.
+- `GET /reindex/{job_id}` — progress (`{done, total, state}`).
+
+**Backfill worker** — four properties keep it correct and cheap:
+- **Async, not in-request** — thousands of records = thousands of LLM calls; the endpoint returns a job id and the work runs in a background worker (**Batch API at 50% cost** for scale).
+- **Idempotent + resumable** — the worker only touches records that *lack* the new dimension (`{f"domain_weights.{d}": {"$exists": False}}`); re-running after a crash finishes the rest. A `schema_version` stamped per doc records what's been backfilled.
+- **Score-only, write-one-field** — one extraction call per text scoring *only the new axes*, then `bulk_write` of `UpdateOne` with `$set` on the nested `domain_weights.<dim>` key. **No re-embedding.**
+- **Cheap interim** — seed the schema `default` via `update_many` instantly so `/recall` never errors on a missing key, then let real per-record scoring land in the background (until it does, the dimension can't discriminate — every record scores the default).
+
+**Index caveat:** only a *gate* dimension (filtered inside `$vectorSearch`) needs a `filter` field added to the Atlas index (an online rebuild); a **scoring-only** dimension needs no index change and is live the moment the backfill writes it.
+
+### 3.8 Ergonomic recall — reinforcement + explainability
+
+Two features that make recall self-tuning and debuggable, implemented in `pensieve/scoring.py`:
+
+- **Recall reinforcement (self-tuning importance).** Each memory carries `access_count` + `last_accessed`. Every *gated* `/recall` follows the result read with a `bulk_write` (`$inc access_count`, `$set last_accessed`) on the returned docs, and `FinalScore` adds `w_reinforce · ln(1 + access_count)`. Memories the agent keeps needing rise; unused ones fade faster. It's **incremental** — no batch job, no LLM — and **neutral at `access_count = 0`** (`ln 1 = 0`), so fresh records aren't penalized. The naive-RAG demo column passes `reinforce=false` so the comparison doesn't skew the counts. This is the reason *not* to cron-rescore weights: importance-from-usage updates itself, one cheap write per recall.
+
+- **Explainable results.** Every hit returns a `score_breakdown { similarity, weight, decay, reinforcement }` next to `final_score`, computed as separate `$addFields` stages. It answers "why did this surface?" for free and drives the demo's per-card score bars (§5).
+
+Both are already in the retrieval pipeline; a caller sees them on every `/recall` response with no extra request.
 
 ---
 
@@ -278,9 +326,15 @@ A single-page app over **mock data** that makes the difference between plain RAG
 
 ## 6. Open Questions / Next Steps
 
-- [ ] Lock the embedding model (Voyage `voyage-3` vs OpenAI `text-embedding-3-small`) — sets `numDimensions`.
-- [ ] Finalize the default Dimension Schemas for the three demo domains.
-- [ ] Decide extraction model + JSON schema for `record`.
-- [ ] Build `seed.py` (index creation + mock data) — **the first buildable unit.**
-- [ ] Implement `/recall` with the `use_gates` toggle.
-- [ ] Wire the side-by-side demo UI.
+- [x] **Embedding model: Voyage `voyage-3.5` @ 1024 dims**, via `ai.mongodb.com/v1/embeddings`. Sets `numDimensions: 1024`.
+- [x] **Default Dimension Schemas** for the three demo domains — in `seed.py`.
+- [x] **Shared package** (`pensieve/`) — `config` (creds), `embeddings` (Voyage), `db` (client + index), `scoring` (recall pipeline). `seed.py` reuses these.
+- [x] **Seed script** (`seed.py`) — index creation + curated mock data + real embeddings; initializes `access_count`.
+- [x] **`/recall`** — semantic + gates + weighted `FinalScore`, with **reinforcement (§3.8)**, **explainable `score_breakdown` (§3.8)**, and a `use_gates` toggle for the demo's side-by-side view.
+- [x] **`/record`** (accepts pre-scored metadata + embeds), **`GET /schema`**, `/health` — in `pensieve/app.py`.
+- [x] **Live end-to-end** — M10 cluster seeded (26 memories, 3 schemas, `memory_index`), recall verified: weighting surfaces the seed round / home over lattes on "how's my spending?". Creds auto-load from `*-creds.txt`; `check_connection.py` (smoke test) + `demo_recall.py` (naive-vs-weighted proof) added.
+- [ ] Start the API server (`uvicorn pensieve.app:app`) and exercise `/recall` over HTTP.
+- [ ] Extraction model on `/record`: `claude-opus-4-8` with structured outputs — needs **two modes**: full first-time extraction, and a *score-just-these-axes* mode for backfill (§3.7). Currently `/record` takes pre-scored metadata.
+- [ ] Implement `/schema` upsert + `/reindex` (§3.7) and the background backfill worker.
+- [ ] Implement `/memories/query` structured browse (§3.6).
+- [ ] Wire the side-by-side demo UI (partner).
