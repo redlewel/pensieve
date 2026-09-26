@@ -1,6 +1,8 @@
 # Secrets — never commit
 mongodb-api-key.txt
 mongodb-cluster-creds.txt
+openrouter-api-key.txt
+codex-api-key.txt
 .env
 
 # Python
