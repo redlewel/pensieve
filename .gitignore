@@ -1,1 +1,10 @@
+# Secrets — never commit
 mongodb-api-key.txt
+mongodb-cluster-creds.txt
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
